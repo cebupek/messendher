@@ -1,0 +1,27 @@
+{
+  "name": "P2P Мессенджер",
+  "short_name": "P2P Chat",
+  "description": "Безопасный P2P мессенджер с end-to-end шифрованием",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#667eea",
+  "theme_color": "#6366f1",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["social", "productivity"],
+  "lang": "ru-RU",
+  "dir": "ltr"
+}
