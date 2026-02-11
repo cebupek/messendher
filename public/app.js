@@ -40,16 +40,32 @@ function addUsernameToSearchDB(username) {
     }
 }
 
-function searchUsernameInDB(query) {
-    const db = JSON.parse(localStorage.getItem('usernames_db') || '[]');
-    console.log('База данных логинов:', db);
+async function searchUsernameInDB(query) {
+    console.log('🔍 Поиск пользователя на сервере:', query);
     
-    // Search case-insensitive
-    const found = db.find(username => 
-        username.toLowerCase() === query.toLowerCase()
-    );
-    
-    return found || null;
+    try {
+        const response = await fetch(`/api/users/search/${encodeURIComponent(query)}`);
+        const data = await response.json();
+        
+        if (data.found) {
+            console.log('✅ Пользователь найден на сервере:', data.user.username);
+            return data.user.username;
+        } else {
+            console.log('❌ Пользователь не найден на сервере:', query);
+            return null;
+        }
+    } catch (error) {
+        console.error('❌ Ошибка поиска на сервере:', error);
+        
+        // Fallback to local database if server is unavailable
+        console.log('⚠️ Используем локальную базу данных');
+        const db = JSON.parse(localStorage.getItem('usernames_db') || '[]');
+        const found = db.find(username => 
+            username.toLowerCase() === query.toLowerCase()
+        );
+        
+        return found || null;
+    }
 }
 
 function syncSearchDBWithUsers() {
@@ -97,9 +113,13 @@ function register() {
         alert('Пользователь уже существует');
         return;
     }
+    
+    // Add username to local search DB
+    addUsernameToSearchDB(username);
+    console.log('Регистрация: логин добавлен в локальную базу:', username);
 
     // Generate encryption keys
-    generateKeyPair().then(keys => {
+    generateKeyPair().then(async keys => {
         users[username] = {
             password: hashPassword(password),
             hint: hint,
@@ -111,10 +131,33 @@ function register() {
 
         localStorage.setItem('users', JSON.stringify(users));
         
-        // Add username to search database
-        addUsernameToSearchDB(username);
+        // Register user on server
+        try {
+            const response = await fetch('/api/register', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ 
+                    username: username,
+                    publicKey: keys.publicKey
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.success) {
+                console.log('✅ Пользователь зарегистрирован на сервере:', username);
+                alert('✅ Регистрация успешна! Теперь вы можете войти.');
+            } else {
+                console.error('❌ Ошибка регистрации на сервере:', data.error);
+                alert('⚠️ Регистрация выполнена локально, но возникла проблема с сервером. Вы можете войти в систему.');
+            }
+        } catch (error) {
+            console.error('❌ Ошибка подключения к серверу:', error);
+            alert('⚠️ Регистрация выполнена локально, но нет подключения к серверу. Вы можете войти в систему.');
+        }
         
-        alert('Регистрация успешна! Теперь вы можете войти.');
         showLogin();
     });
 }
@@ -179,7 +222,9 @@ function startApp() {
     document.getElementById('appScreen').classList.remove('hidden');
     
     document.getElementById('currentUsername').textContent = currentUser.username;
-    document.getElementById('userAvatar').textContent = currentUser.username[0].toUpperCase();
+    
+    // Update user avatar
+    updateUserAvatar();
     
     loadChats();
     connectWebSocket();
@@ -221,7 +266,11 @@ function handleWebSocketMessage(data) {
             updateOnlineStatus();
             break;
         case 'message':
-            receiveMessage(data);
+            if (data.notification && data.notification.type === 'chat_invite') {
+                handleChatInvite(data.notification);
+            } else {
+                receiveMessage(data);
+            }
             break;
         case 'signal':
             handleSignal(data);
@@ -316,14 +365,28 @@ function saveChats() {
     localStorage.setItem(`chats_${currentUser.username}`, JSON.stringify(chats));
 }
 
-function renderChatsList() {
+function renderChatsList(searchQuery = '') {
     const container = document.getElementById('chatsList');
     container.innerHTML = '';
     
-    const filteredChats = chats.filter(chat => !chat.hidden);
+    let filteredChats = chats.filter(chat => !chat.hidden);
+    
+    // Apply search filter if query provided
+    if (searchQuery.trim()) {
+        const query = searchQuery.toLowerCase();
+        filteredChats = filteredChats.filter(chat => 
+            chat.name.toLowerCase().includes(query) ||
+            chat.participants?.some(p => p.toLowerCase().includes(query)) ||
+            chat.members?.some(m => m.toLowerCase().includes(query))
+        );
+    }
     
     if (filteredChats.length === 0) {
-        container.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 20px;">Нет чатов</p>';
+        if (searchQuery.trim()) {
+            container.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 20px;">Чаты не найдены</p>';
+        } else {
+            container.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 20px;">Нет чатов</p>';
+        }
         return;
     }
     
@@ -335,8 +398,16 @@ function renderChatsList() {
         const lastMessage = chat.messages?.[chat.messages.length - 1];
         const unreadCount = chat.messages?.filter(m => !m.read && m.sender !== currentUser.username).length || 0;
         
+        // Create avatar element
+        let avatarHtml = '';
+        if (chat.avatar) {
+            avatarHtml = `<div class="chat-avatar" style="background-image: url(${chat.avatar}); background-size: cover; background-position: center;"></div>`;
+        } else {
+            avatarHtml = `<div class="chat-avatar">${chat.name[0].toUpperCase()}</div>`;
+        }
+        
         div.innerHTML = `
-            <div class="chat-avatar">${chat.name[0].toUpperCase()}</div>
+            ${avatarHtml}
             <div class="chat-info">
                 <h4>${chat.name}</h4>
                 <p>${lastMessage ? (lastMessage.text?.substring(0, 30) || '📎 Файл') : 'Нет сообщений'}</p>
@@ -349,6 +420,12 @@ function renderChatsList() {
         
         container.appendChild(div);
     });
+}
+
+function searchChats() {
+    const searchInput = document.getElementById('searchInput');
+    const query = searchInput.value.trim();
+    renderChatsList(query);
 }
 
 function openChat(chatId) {
@@ -366,7 +443,18 @@ function openChat(chatId) {
     document.getElementById('emptyState').classList.add('hidden');
     document.getElementById('chatView').classList.remove('hidden');
     document.getElementById('chatName').textContent = chat.name;
-    document.getElementById('chatAvatar').textContent = chat.name[0].toUpperCase();
+    
+    // Update chat avatar
+    const chatAvatarElement = document.getElementById('chatAvatar');
+    if (chat.avatar) {
+        chatAvatarElement.style.backgroundImage = `url(${chat.avatar})`;
+        chatAvatarElement.style.backgroundSize = 'cover';
+        chatAvatarElement.style.backgroundPosition = 'center';
+        chatAvatarElement.textContent = '';
+    } else {
+        chatAvatarElement.style.backgroundImage = 'none';
+        chatAvatarElement.textContent = chat.name[0].toUpperCase();
+    }
     
     // Update status
     let statusText = '';
@@ -558,6 +646,9 @@ function broadcastToGroup(chatId, message) {
         recipients: chat.participants,
         from: currentUser.username,
         chatId: chatId,
+        chatName: chat.name,
+        chatType: chat.type,
+        allParticipants: [...chat.participants, currentUser.username], // Включаем всех участников включая отправителя
         message: message
     }));
 }
@@ -580,6 +671,30 @@ async function receiveMessage(data) {
     let chat = chats.find(c => c.id === data.chatId);
     
     if (!chat) {
+        // Загрузить публичный ключ отправителя если его нет
+        const users = JSON.parse(localStorage.getItem('users') || '{}');
+        if (!users[data.from] || !users[data.from].publicKey) {
+            try {
+                const response = await fetch(`/api/users/search/${encodeURIComponent(data.from)}`);
+                const apiData = await response.json();
+                
+                if (apiData.found && apiData.user.publicKey) {
+                    if (!users[data.from]) {
+                        users[data.from] = {
+                            publicKey: apiData.user.publicKey,
+                            addedAt: Date.now()
+                        };
+                    } else {
+                        users[data.from].publicKey = apiData.user.publicKey;
+                    }
+                    localStorage.setItem('users', JSON.stringify(users));
+                    console.log('✅ Публичный ключ отправителя сохранен:', data.from);
+                }
+            } catch (error) {
+                console.error('❌ Ошибка получения публичного ключа отправителя:', error);
+            }
+        }
+        
         chat = {
             id: data.chatId || generateId(),
             name: data.from,
@@ -608,8 +723,28 @@ async function receiveMessage(data) {
 }
 
 function receiveBroadcastMessage(data) {
-    const chat = chats.find(c => c.id === data.chatId);
-    if (!chat) return;
+    let chat = chats.find(c => c.id === data.chatId);
+    
+    // Если чата нет, создаем его автоматически
+    if (!chat) {
+        console.log('📨 Получено сообщение для несуществующего чата, создаю чат:', data.chatId);
+        
+        // Определяем имя чата
+        let chatName = data.chatName || data.from;
+        let chatType = data.chatType || 'group';
+        
+        chat = {
+            id: data.chatId,
+            name: chatName,
+            type: chatType,
+            participants: data.allParticipants || [data.from, currentUser.username],
+            messages: [],
+            createdAt: Date.now()
+        };
+        
+        chats.unshift(chat);
+        console.log('✅ Чат автоматически создан:', chat);
+    }
     
     chat.messages = chat.messages || [];
     chat.messages.push(data.message);
@@ -620,6 +755,64 @@ function receiveBroadcastMessage(data) {
     }
     
     renderChatsList();
+    
+    // Show notification if not in focus
+    if (document.hidden) {
+        showNotification(`${data.from} в ${chat.name}: ${data.message.text}`);
+    }
+}
+
+async function handleChatInvite(notification) {
+    console.log('📨 Получено приглашение в чат:', notification);
+    
+    // Проверяем, есть ли уже такой чат
+    let chat = chats.find(c => c.id === notification.chatId);
+    
+    if (!chat) {
+        // Загружаем публичные ключи участников
+        if (notification.participants && notification.participants.length > 0) {
+            for (const username of notification.participants) {
+                if (username !== currentUser.username) {
+                    try {
+                        const response = await fetch(`/api/users/search/${encodeURIComponent(username)}`);
+                        const data = await response.json();
+                        
+                        if (data.found && data.user.publicKey) {
+                            const users = JSON.parse(localStorage.getItem('users') || '{}');
+                            if (!users[username]) {
+                                users[username] = {
+                                    publicKey: data.user.publicKey,
+                                    addedAt: Date.now()
+                                };
+                            } else if (!users[username].publicKey) {
+                                users[username].publicKey = data.user.publicKey;
+                            }
+                            localStorage.setItem('users', JSON.stringify(users));
+                            console.log('✅ Публичный ключ участника сохранен:', username);
+                        }
+                    } catch (error) {
+                        console.error('❌ Ошибка получения публичного ключа для:', username, error);
+                    }
+                }
+            }
+        }
+        
+        // Создаем новый чат
+        chat = {
+            id: notification.chatId,
+            name: notification.chatName,
+            type: notification.chatType,
+            participants: notification.participants || [],
+            messages: [],
+            createdAt: notification.timestamp
+        };
+        chats.unshift(chat);
+        saveChats();
+        renderChatsList();
+        
+        // Показываем уведомление
+        showNotification(`${notification.invitedBy} добавил вас в ${notification.chatType === 'group' ? 'группу' : 'канал'} "${notification.chatName}"`);
+    }
 }
 
 function handleMessageKeyPress(event) {
@@ -736,12 +929,44 @@ function handleStickerSelect(event) {
 function handleFileAttachment(file) {
     if (!file || !currentChat) return;
     
+    // Show modal to add description
+    createModal('📎 Отправка файла', `
+        <div style="text-align: center; margin-bottom: 20px;">
+            <div style="background: var(--glass-bg); padding: 20px; border-radius: 12px; border: 1px solid var(--glass-border);">
+                <div style="font-size: 48px; margin-bottom: 10px;">
+                    ${file.type.startsWith('image/') ? '🖼️' : file.type.startsWith('video/') ? '🎥' : '📄'}
+                </div>
+                <div style="font-weight: 600; margin-bottom: 5px;">${file.name}</div>
+                <div style="font-size: 12px; color: var(--text-muted);">
+                    ${(file.size / 1024).toFixed(1)} КБ
+                </div>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>Добавить описание (необязательно)</label>
+            <textarea id="fileDescription" placeholder="Напишите описание к файлу..." style="min-height: 80px; resize: vertical;"></textarea>
+        </div>
+        <button class="btn" onclick="sendFileWithDescription()">📤 Отправить</button>
+        <button class="btn btn-secondary" onclick="closeModal()">❌ Отмена</button>
+    `);
+    
+    // Store file in temporary variable
+    window.tempFileToSend = file;
+}
+
+function sendFileWithDescription() {
+    const file = window.tempFileToSend;
+    const description = document.getElementById('fileDescription').value.trim();
+    
+    if (!file) return;
+    
     const reader = new FileReader();
     reader.onload = (e) => {
         const message = {
             id: generateId(),
             sender: currentUser.username,
             timestamp: Date.now(),
+            text: description || '',
             file: {
                 name: file.name,
                 type: file.type,
@@ -765,6 +990,10 @@ function handleFileAttachment(file) {
         
         renderMessages();
         renderChatsList();
+        closeModal();
+        
+        // Clear temp file
+        window.tempFileToSend = null;
     };
     
     reader.readAsDataURL(file);
@@ -796,7 +1025,7 @@ function openNewChatModal() {
     }, 100);
 }
 
-function searchUserInModal() {
+async function searchUserInModal() {
     const searchInput = document.getElementById('userSearchInput');
     const query = searchInput.value.trim();
     const resultDiv = document.getElementById('searchResult');
@@ -807,52 +1036,102 @@ function searchUserInModal() {
     }
     
     console.log('Поиск в модальном окне:', query);
+    console.log('Текущий пользователь:', currentUser.username);
     
-    // Search in usernames database
-    const foundUsername = searchUsernameInDB(query);
+    // Show loading
+    resultDiv.innerHTML = '<p style="text-align: center; color: var(--text-muted);">🔍 Поиск...</p>';
     
-    if (foundUsername) {
-        console.log('Найден пользователь:', foundUsername);
+    try {
+        // Search on server first
+        const response = await fetch(`/api/users/search/${encodeURIComponent(query)}`);
+        const data = await response.json();
         
-        // Check if trying to chat with yourself
-        if (foundUsername === currentUser.username) {
-            resultDiv.innerHTML = '<p style="color: var(--danger); text-align: center;">❌ Вы не можете создать чат с самим собой!</p>';
-            return;
-        }
+        console.log('Результат поиска на сервере:', data);
         
-        // Show found user
-        resultDiv.innerHTML = `
-            <div class="member-item" style="background: var(--glass-bg); padding: 14px; border-radius: 12px; border: 1px solid var(--glass-border);">
-                <div class="member-info">
-                    <div class="avatar" style="width: 40px; height: 40px; font-size: 16px;">${foundUsername[0].toUpperCase()}</div>
-                    <div>
-                        <div style="font-weight: 600;">${foundUsername}</div>
-                        <div style="font-size: 12px; color: var(--text-muted);">Пользователь найден ✅</div>
+        if (data.found) {
+            const foundUsername = data.user.username;
+            console.log('✅ Найден пользователь на сервере:', foundUsername);
+            
+            // Check if trying to chat with yourself
+            if (foundUsername === currentUser.username) {
+                resultDiv.innerHTML = '<p style="color: var(--danger); text-align: center;">❌ Вы не можете создать чат с самим собой!</p>';
+                return;
+            }
+            
+            // Add to local DB if not exists
+            addUsernameToSearchDB(foundUsername);
+            
+            // Show found user
+            resultDiv.innerHTML = `
+                <div class="member-item" style="background: var(--glass-bg); padding: 14px; border-radius: 12px; border: 1px solid var(--glass-border);">
+                    <div class="member-info">
+                        <div class="avatar" style="width: 40px; height: 40px; font-size: 16px;">${foundUsername[0].toUpperCase()}</div>
+                        <div>
+                            <div style="font-weight: 600;">${foundUsername}</div>
+                            <div style="font-size: 12px; color: var(--text-muted);">Пользователь найден ✅</div>
+                        </div>
                     </div>
+                    <button class="btn" onclick="startPrivateChatFromSearch('${foundUsername}')" style="width: auto; padding: 10px 20px;">
+                        💬 Начать чат
+                    </button>
                 </div>
-                <button class="btn" onclick="startPrivateChatFromSearch('${foundUsername}')" style="width: auto; padding: 10px 20px;">
-                    💬 Начать чат
-                </button>
-            </div>
-        `;
-    } else {
-        console.log('Пользователь не найден:', query);
-        const db = JSON.parse(localStorage.getItem('usernames_db') || '[]');
-        console.log('Доступные логины:', db);
+            `;
+        } else {
+            console.log('❌ Пользователь не найден на сервере:', query);
+            
+            resultDiv.innerHTML = `
+                <div style="text-align: center; padding: 20px;">
+                    <p style="color: var(--danger); font-size: 18px; margin-bottom: 8px;">❌ Пользователь не найден</p>
+                    <p style="color: var(--text-muted); font-size: 14px;">
+                        Пользователь "${query}" не зарегистрирован в системе.<br>
+                        Проверьте правильность написания логина.
+                    </p>
+                </div>
+            `;
+        }
+    } catch (error) {
+        console.error('❌ Ошибка поиска на сервере:', error);
         
-        resultDiv.innerHTML = `
-            <div style="text-align: center; padding: 20px;">
-                <p style="color: var(--danger); font-size: 18px; margin-bottom: 8px;">❌ Пользователь не найден</p>
-                <p style="color: var(--text-muted); font-size: 14px;">
-                    Пользователь "${query}" не зарегистрирован в системе.<br>
-                    Проверьте правильность написания логина.
-                </p>
-            </div>
-        `;
+        // Fallback to local search
+        const foundUsername = await searchUsernameInDB(query);
+        
+        if (foundUsername) {
+            console.log('✅ Найден в локальной базе:', foundUsername);
+            
+            if (foundUsername === currentUser.username) {
+                resultDiv.innerHTML = '<p style="color: var(--danger); text-align: center;">❌ Вы не можете создать чат с самим собой!</p>';
+                return;
+            }
+            
+            resultDiv.innerHTML = `
+                <div class="member-item" style="background: var(--glass-bg); padding: 14px; border-radius: 12px; border: 1px solid var(--glass-border);">
+                    <div class="member-info">
+                        <div class="avatar" style="width: 40px; height: 40px; font-size: 16px;">${foundUsername[0].toUpperCase()}</div>
+                        <div>
+                            <div style="font-weight: 600;">${foundUsername}</div>
+                            <div style="font-size: 12px; color: var(--text-muted);">Найден локально ✅</div>
+                        </div>
+                    </div>
+                    <button class="btn" onclick="startPrivateChatFromSearch('${foundUsername}')" style="width: auto; padding: 10px 20px;">
+                        💬 Начать чат
+                    </button>
+                </div>
+            `;
+        } else {
+            resultDiv.innerHTML = `
+                <div style="text-align: center; padding: 20px;">
+                    <p style="color: var(--danger); font-size: 18px; margin-bottom: 8px;">❌ Пользователь не найден</p>
+                    <p style="color: var(--text-muted); font-size: 14px;">
+                        Пользователь "${query}" не найден.<br>
+                        Проверьте подключение к серверу и правильность логина.
+                    </p>
+                </div>
+            `;
+        }
     }
 }
 
-function startPrivateChatFromSearch(username) {
+async function startPrivateChatFromSearch(username) {
     closeModal();
     
     // Check if chat already exists (including hidden)
@@ -865,6 +1144,29 @@ function startPrivateChatFromSearch(username) {
             saveChats();
         }
     } else {
+        // Get user's public key from server
+        try {
+            const response = await fetch(`/api/users/search/${encodeURIComponent(username)}`);
+            const data = await response.json();
+            
+            if (data.found && data.user.publicKey) {
+                // Save user's public key to local storage
+                const users = JSON.parse(localStorage.getItem('users') || '{}');
+                if (!users[username]) {
+                    users[username] = {
+                        publicKey: data.user.publicKey,
+                        addedAt: Date.now()
+                    };
+                } else if (!users[username].publicKey) {
+                    users[username].publicKey = data.user.publicKey;
+                }
+                localStorage.setItem('users', JSON.stringify(users));
+                console.log('✅ Публичный ключ пользователя сохранен:', username);
+            }
+        } catch (error) {
+            console.error('❌ Ошибка получения публичного ключа:', error);
+        }
+        
         // Create new chat
         chat = {
             id: generateId(),
@@ -886,6 +1188,13 @@ function startPrivateChatFromSearch(username) {
 function openCreateGroupModal() {
     createModal('Создать группу', `
         <div class="form-group">
+            <label>Аватар группы (необязательно)</label>
+            <div style="text-align: center; margin-bottom: 15px;">
+                <div id="groupAvatarPreview" class="avatar" style="width: 80px; height: 80px; font-size: 32px; margin: 0 auto;">👥</div>
+            </div>
+            <input type="file" id="groupAvatarInput" accept="image/*" style="padding: 12px; border: 2px dashed var(--glass-border); border-radius: 12px; background: var(--glass-bg);">
+        </div>
+        <div class="form-group">
             <label>Название группы</label>
             <input type="text" id="groupName" placeholder="Введите название...">
         </div>
@@ -897,10 +1206,33 @@ function openCreateGroupModal() {
     `);
     
     renderMembersSelect('groupMembersSelect');
+    
+    // Add preview for avatar
+    document.getElementById('groupAvatarInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file && file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const preview = document.getElementById('groupAvatarPreview');
+                preview.style.backgroundImage = `url(${event.target.result})`;
+                preview.style.backgroundSize = 'cover';
+                preview.style.backgroundPosition = 'center';
+                preview.textContent = '';
+            };
+            reader.readAsDataURL(file);
+        }
+    });
 }
 
 function openCreateChannelModal() {
     createModal('Создать канал', `
+        <div class="form-group">
+            <label>Аватар канала (необязательно)</label>
+            <div style="text-align: center; margin-bottom: 15px;">
+                <div id="channelAvatarPreview" class="avatar" style="width: 80px; height: 80px; font-size: 32px; margin: 0 auto;">📢</div>
+            </div>
+            <input type="file" id="channelAvatarInput" accept="image/*" style="padding: 12px; border: 2px dashed var(--glass-border); border-radius: 12px; background: var(--glass-bg);">
+        </div>
         <div class="form-group">
             <label>Название канала</label>
             <input type="text" id="channelName" placeholder="Введите название...">
@@ -913,6 +1245,22 @@ function openCreateChannelModal() {
     `);
     
     renderMembersSelect('channelMembersSelect');
+    
+    // Add preview for avatar
+    document.getElementById('channelAvatarInput').addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (file && file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const preview = document.getElementById('channelAvatarPreview');
+                preview.style.backgroundImage = `url(${event.target.result})`;
+                preview.style.backgroundSize = 'cover';
+                preview.style.backgroundPosition = 'center';
+                preview.textContent = '';
+            };
+            reader.readAsDataURL(file);
+        }
+    });
 }
 
 function renderMembersSelect(containerId) {
@@ -947,6 +1295,46 @@ function createGroup() {
         return;
     }
     
+    // Get avatar if uploaded
+    const avatarInput = document.getElementById('groupAvatarInput');
+    const avatarFile = avatarInput?.files[0];
+    
+    if (avatarFile) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            createGroupWithAvatar(name, participants, e.target.result);
+        };
+        reader.readAsDataURL(avatarFile);
+    } else {
+        createGroupWithAvatar(name, participants, null);
+    }
+}
+
+async function createGroupWithAvatar(name, participants, avatar) {
+    // Загрузить публичные ключи участников
+    for (const username of participants) {
+        try {
+            const response = await fetch(`/api/users/search/${encodeURIComponent(username)}`);
+            const data = await response.json();
+            
+            if (data.found && data.user.publicKey) {
+                const users = JSON.parse(localStorage.getItem('users') || '{}');
+                if (!users[username]) {
+                    users[username] = {
+                        publicKey: data.user.publicKey,
+                        addedAt: Date.now()
+                    };
+                } else if (!users[username].publicKey) {
+                    users[username].publicKey = data.user.publicKey;
+                }
+                localStorage.setItem('users', JSON.stringify(users));
+                console.log('✅ Публичный ключ участника сохранен:', username);
+            }
+        } catch (error) {
+            console.error('❌ Ошибка получения публичного ключа для:', username, error);
+        }
+    }
+    
     const group = {
         id: generateId(),
         name: name,
@@ -954,12 +1342,38 @@ function createGroup() {
         participants: participants,
         admins: [currentUser.username],
         messages: [],
+        avatar: avatar,
         createdAt: Date.now()
     };
     
     chats.push(group);
     saveChats();
     renderChatsList();
+    
+    // Отправить уведомления участникам
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        const notification = {
+            type: 'chat_invite',
+            chatId: group.id,
+            chatName: group.name,
+            chatType: 'group',
+            invitedBy: currentUser.username,
+            participants: [...participants, currentUser.username],
+            timestamp: Date.now()
+        };
+        
+        participants.forEach(member => {
+            if (member !== currentUser.username) {
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    to: member,
+                    from: currentUser.username,
+                    notification: notification
+                }));
+            }
+        });
+    }
+    
     closeModal();
     
     alert('Группа создана!');
@@ -975,6 +1389,46 @@ function createChannel() {
         return;
     }
     
+    // Get avatar if uploaded
+    const avatarInput = document.getElementById('channelAvatarInput');
+    const avatarFile = avatarInput?.files[0];
+    
+    if (avatarFile) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            createChannelWithAvatar(name, participants, e.target.result);
+        };
+        reader.readAsDataURL(avatarFile);
+    } else {
+        createChannelWithAvatar(name, participants, null);
+    }
+}
+
+async function createChannelWithAvatar(name, participants, avatar) {
+    // Загрузить публичные ключи участников
+    for (const username of participants) {
+        try {
+            const response = await fetch(`/api/users/search/${encodeURIComponent(username)}`);
+            const data = await response.json();
+            
+            if (data.found && data.user.publicKey) {
+                const users = JSON.parse(localStorage.getItem('users') || '{}');
+                if (!users[username]) {
+                    users[username] = {
+                        publicKey: data.user.publicKey,
+                        addedAt: Date.now()
+                    };
+                } else if (!users[username].publicKey) {
+                    users[username].publicKey = data.user.publicKey;
+                }
+                localStorage.setItem('users', JSON.stringify(users));
+                console.log('✅ Публичный ключ участника сохранен:', username);
+            }
+        } catch (error) {
+            console.error('❌ Ошибка получения публичного ключа для:', username, error);
+        }
+    }
+    
     const channel = {
         id: generateId(),
         name: name,
@@ -982,12 +1436,38 @@ function createChannel() {
         participants: participants,
         admins: [currentUser.username],
         messages: [],
+        avatar: avatar,
         createdAt: Date.now()
     };
     
     chats.push(channel);
     saveChats();
     renderChatsList();
+    
+    // Отправить уведомления участникам
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        const notification = {
+            type: 'chat_invite',
+            chatId: channel.id,
+            chatName: channel.name,
+            chatType: 'channel',
+            invitedBy: currentUser.username,
+            participants: [...participants, currentUser.username],
+            timestamp: Date.now()
+        };
+        
+        participants.forEach(member => {
+            if (member !== currentUser.username) {
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    to: member,
+                    from: currentUser.username,
+                    notification: notification
+                }));
+            }
+        });
+    }
+    
     closeModal();
     
     alert('Канал создан!');
@@ -1126,13 +1606,61 @@ function addMembersToChat() {
     createModal('Добавить участников', html);
 }
 
-function confirmAddMembers() {
+async function confirmAddMembers() {
     const checkboxes = document.querySelectorAll('.add-member-checkbox:checked');
     const newMembers = Array.from(checkboxes).map(cb => cb.value);
     
     if (newMembers.length > 0) {
+        // Загрузить публичные ключи новых участников
+        for (const username of newMembers) {
+            try {
+                const response = await fetch(`/api/users/search/${encodeURIComponent(username)}`);
+                const data = await response.json();
+                
+                if (data.found && data.user.publicKey) {
+                    const users = JSON.parse(localStorage.getItem('users') || '{}');
+                    if (!users[username]) {
+                        users[username] = {
+                            publicKey: data.user.publicKey,
+                            addedAt: Date.now()
+                        };
+                    } else if (!users[username].publicKey) {
+                        users[username].publicKey = data.user.publicKey;
+                    }
+                    localStorage.setItem('users', JSON.stringify(users));
+                    console.log('✅ Публичный ключ участника сохранен:', username);
+                }
+            } catch (error) {
+                console.error('❌ Ошибка получения публичного ключа для:', username, error);
+            }
+        }
+        
+        // Добавить новых участников
         currentChat.participants.push(...newMembers);
         saveChats();
+        
+        // Отправить оповещение новым участникам через WebSocket
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            const notification = {
+                type: 'chat_invite',
+                chatId: currentChat.id,
+                chatName: currentChat.name,
+                chatType: currentChat.type,
+                invitedBy: currentUser.username,
+                participants: [...currentChat.participants, currentUser.username],
+                timestamp: Date.now()
+            };
+            
+            newMembers.forEach(member => {
+                ws.send(JSON.stringify({
+                    type: 'message',
+                    to: member,
+                    from: currentUser.username,
+                    notification: notification
+                }));
+            });
+        }
+        
         renderChatMembers();
         alert(`Добавлено участников: ${newMembers.length}`);
     }
@@ -1444,7 +1972,7 @@ function updateOnlineStatus() {
     }
 }
 
-function performSearch() {
+async function performSearch() {
     const searchInput = document.getElementById('searchInput');
     const query = searchInput.value.trim();
     
@@ -1455,77 +1983,137 @@ function performSearch() {
     }
     
     console.log('Поиск пользователя:', query);
+    console.log('Текущий пользователь:', currentUser.username);
     
-    // Search in usernames database
-    const foundUsername = searchUsernameInDB(query);
-    
-    if (foundUsername) {
-        console.log('Найден логин в базе данных:', foundUsername);
+    try {
+        // Search on server
+        const response = await fetch(`/api/users/search/${encodeURIComponent(query)}`);
+        const data = await response.json();
         
-        // Check if trying to chat with yourself
-        if (foundUsername === currentUser.username) {
-            alert('❌ Вы не можете создать чат с самим собой!');
-            searchInput.value = '';
-            return;
-        }
+        console.log('Результат поиска на сервере:', data);
         
-        // Verify user still exists in users database
-        const users = JSON.parse(localStorage.getItem('users') || '{}');
-        if (!users[foundUsername]) {
-            alert('❌ Ошибка: пользователь найден в базе логинов, но не найден в базе пользователей.');
-            console.error('Несоответствие баз данных для:', foundUsername);
-            return;
-        }
-        
-        // Check if chat already exists (including hidden ones)
-        const existingPrivateChat = chats.find(c => 
-            c.type === 'private' && 
-            c.participants.includes(foundUsername)
-        );
-        
-        if (existingPrivateChat) {
-            // If chat exists but is hidden, unhide it
-            if (existingPrivateChat.hidden) {
-                existingPrivateChat.hidden = false;
-                saveChats();
-                renderChatsList();
+        if (data.found) {
+            const foundUsername = data.user.username;
+            console.log('✅ Найден логин на сервере:', foundUsername);
+            
+            // Check if trying to chat with yourself
+            if (foundUsername === currentUser.username) {
+                alert('❌ Вы не можете создать чат с самим собой!');
+                searchInput.value = '';
+                return;
             }
-            openChat(existingPrivateChat.id);
+            
+            // Add to local DB
+            addUsernameToSearchDB(foundUsername);
+            
+            // Verify user still exists in users database
+            const users = JSON.parse(localStorage.getItem('users') || '{}');
+            if (!users[foundUsername]) {
+                // User not in local storage, that's OK - they're on server
+                console.log('⚠️ Пользователь найден на сервере, но отсутствует локально:', foundUsername);
+            }
+            
+            // Check if chat already exists (including hidden ones)
+            const existingPrivateChat = chats.find(c => 
+                c.type === 'private' && 
+                c.participants.includes(foundUsername)
+            );
+            
+            if (existingPrivateChat) {
+                // If chat exists but is hidden, unhide it
+                if (existingPrivateChat.hidden) {
+                    existingPrivateChat.hidden = false;
+                    saveChats();
+                    renderChatsList();
+                }
+                openChat(existingPrivateChat.id);
+                searchInput.value = '';
+                console.log('Открыт существующий чат с:', foundUsername);
+                return;
+            }
+            
+            // Create new chat with found user
+            const newChat = {
+                id: generateId(),
+                name: foundUsername,
+                type: 'private',
+                participants: [foundUsername],
+                messages: [],
+                createdAt: Date.now(),
+                hidden: false
+            };
+            
+            chats.unshift(newChat);
+            saveChats();
+            renderChatsList();
+            openChat(newChat.id);
             searchInput.value = '';
-            console.log('Открыт существующий чат с:', foundUsername);
-            return;
+            
+            console.log('Создан новый чат с:', foundUsername);
+            alert(`✅ Чат с пользователем "${foundUsername}" создан!`);
+        } else {
+            console.log('❌ Логин не найден на сервере:', query);
+            alert(`❌ Пользователь "${query}" не найден.\n\nПроверьте правильность написания логина.\nПользователь должен быть зарегистрирован в системе.`);
         }
+    } catch (error) {
+        console.error('❌ Ошибка подключения к серверу:', error);
         
-        // Create new chat with found user
-        const newChat = {
-            id: generateId(),
-            name: foundUsername,
-            type: 'private',
-            participants: [foundUsername],
-            messages: [],
-            createdAt: Date.now(),
-            hidden: false
-        };
+        // Fallback to local search
+        const foundUsername = await searchUsernameInDB(query);
         
-        chats.unshift(newChat);
-        saveChats();
-        renderChatsList();
-        openChat(newChat.id);
-        searchInput.value = '';
-        
-        console.log('Создан новый чат с:', foundUsername);
-        alert(`✅ Чат с пользователем "${foundUsername}" создан!`);
-    } else {
-        console.log('Логин не найден в базе данных:', query);
-        const db = JSON.parse(localStorage.getItem('usernames_db') || '[]');
-        console.log('Доступные логины в базе:', db);
-        alert(`❌ Пользователь "${query}" не найден.\n\nПроверьте правильность написания логина.\nПользователь должен быть зарегистрирован в системе.`);
+        if (foundUsername) {
+            console.log('✅ Найден в локальной базе:', foundUsername);
+            
+            if (foundUsername === currentUser.username) {
+                alert('❌ Вы не можете создать чат с самим собой!');
+                searchInput.value = '';
+                return;
+            }
+            
+            const existingPrivateChat = chats.find(c => 
+                c.type === 'private' && 
+                c.participants.includes(foundUsername)
+            );
+            
+            if (existingPrivateChat) {
+                if (existingPrivateChat.hidden) {
+                    existingPrivateChat.hidden = false;
+                    saveChats();
+                    renderChatsList();
+                }
+                openChat(existingPrivateChat.id);
+                searchInput.value = '';
+                return;
+            }
+            
+            const newChat = {
+                id: generateId(),
+                name: foundUsername,
+                type: 'private',
+                participants: [foundUsername],
+                messages: [],
+                createdAt: Date.now(),
+                hidden: false
+            };
+            
+            chats.unshift(newChat);
+            saveChats();
+            renderChatsList();
+            openChat(newChat.id);
+            searchInput.value = '';
+            
+            alert(`✅ Чат с пользователем "${foundUsername}" создан (локальная база)!`);
+        } else {
+            alert(`❌ Пользователь "${query}" не найден.\n\nПроверьте подключение к серверу и правильность логина.`);
+        }
     }
 }
 
-// Keep old searchChats for compatibility
-function searchChats(query) {
-    performSearch();
+// Keep old searchChats for local filtering
+function searchChats() {
+    const searchInput = document.getElementById('searchInput');
+    const query = searchInput.value.trim();
+    renderChatsList(query);
 }
 
 function showNotification(message) {
@@ -1588,6 +2176,9 @@ function openAppSettings() {
         
         <h3 style="margin-bottom: 16px;">👤 Управление аккаунтом</h3>
         <div style="display: flex; flex-direction: column; gap: 10px;">
+            <button class="btn btn-secondary" onclick="openAvatarUploadModal()">
+                🖼️ Загрузить аватар
+            </button>
             <button class="btn btn-secondary" onclick="openChangeUsernameModal()">
                 ✏️ Изменить логин
             </button>
@@ -1603,6 +2194,101 @@ function openAppSettings() {
             Текущий логин: <strong>${currentUser.username}</strong>
         </p>
     `);
+}
+
+function openAvatarUploadModal() {
+    closeModal();
+    const currentAvatar = currentUser.avatar;
+    const avatarPreview = currentAvatar 
+        ? `<img src="${currentAvatar}" style="width: 120px; height: 120px; border-radius: 50%; object-fit: cover; margin: 0 auto 20px;">`
+        : `<div class="avatar" style="width: 120px; height: 120px; font-size: 48px; margin: 0 auto 20px;">${currentUser.username[0].toUpperCase()}</div>`;
+    
+    createModal('🖼️ Загрузить аватар', `
+        <div style="text-align: center;">
+            ${avatarPreview}
+        </div>
+        <div class="form-group">
+            <label>Выберите изображение (макс. 2 МБ)</label>
+            <input type="file" id="avatarInput" accept="image/*" style="padding: 12px; border: 2px dashed var(--glass-border); border-radius: 12px; background: var(--glass-bg);">
+        </div>
+        <button class="btn" onclick="uploadAvatar()">✅ Загрузить</button>
+        ${currentAvatar ? '<button class="btn" onclick="removeAvatar()" style="background: var(--danger);">🗑️ Удалить аватар</button>' : ''}
+        <button class="btn btn-secondary" onclick="openAppSettings()">❌ Отмена</button>
+    `);
+}
+
+function uploadAvatar() {
+    const fileInput = document.getElementById('avatarInput');
+    const file = fileInput.files[0];
+    
+    if (!file) {
+        alert('⚠️ Выберите изображение');
+        return;
+    }
+    
+    // Check file size (max 2MB)
+    if (file.size > 2 * 1024 * 1024) {
+        alert('⚠️ Файл слишком большой. Максимальный размер: 2 МБ');
+        return;
+    }
+    
+    // Check file type
+    if (!file.type.startsWith('image/')) {
+        alert('⚠️ Выберите изображение');
+        return;
+    }
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        const avatarData = e.target.result;
+        
+        // Save avatar to user
+        const users = JSON.parse(localStorage.getItem('users') || '{}');
+        if (users[currentUser.username]) {
+            users[currentUser.username].avatar = avatarData;
+            localStorage.setItem('users', JSON.stringify(users));
+            currentUser.avatar = avatarData;
+            
+            // Update UI
+            updateUserAvatar();
+            
+            alert('✅ Аватар успешно загружен!');
+            closeModal();
+        }
+    };
+    reader.readAsDataURL(file);
+}
+
+function removeAvatar() {
+    if (!confirm('Вы уверены, что хотите удалить аватар?')) {
+        return;
+    }
+    
+    const users = JSON.parse(localStorage.getItem('users') || '{}');
+    if (users[currentUser.username]) {
+        users[currentUser.username].avatar = null;
+        localStorage.setItem('users', JSON.stringify(users));
+        currentUser.avatar = null;
+        
+        // Update UI
+        updateUserAvatar();
+        
+        alert('✅ Аватар удален');
+        closeModal();
+    }
+}
+
+function updateUserAvatar() {
+    const avatarElement = document.getElementById('userAvatar');
+    if (currentUser.avatar) {
+        avatarElement.style.backgroundImage = `url(${currentUser.avatar})`;
+        avatarElement.style.backgroundSize = 'cover';
+        avatarElement.style.backgroundPosition = 'center';
+        avatarElement.textContent = '';
+    } else {
+        avatarElement.style.backgroundImage = 'none';
+        avatarElement.textContent = currentUser.username[0].toUpperCase();
+    }
 }
 
 function openChangeUsernameModal() {
