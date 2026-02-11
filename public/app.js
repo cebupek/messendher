@@ -440,6 +440,18 @@ function openChat(chatId) {
     });
     saveChats();
     
+    // Close mobile menu on mobile devices
+    if (window.innerWidth <= 768) {
+        const sidebar = document.getElementById('sidebar');
+        const toggle = document.getElementById('mobileToggle');
+        if (sidebar) {
+            sidebar.classList.remove('active');
+        }
+        if (toggle) {
+            toggle.textContent = '☰';
+        }
+    }
+    
     document.getElementById('emptyState').classList.add('hidden');
     document.getElementById('chatView').classList.remove('hidden');
     document.getElementById('chatName').textContent = chat.name;
@@ -468,11 +480,35 @@ function openChat(chatId) {
     }
     document.getElementById('chatStatus').textContent = statusText;
     
-    // Show/hide call button
-    document.getElementById('callBtn').style.display = chat.type !== 'channel' ? 'flex' : 'none';
+    // Show/hide call buttons for private chats only
+    const voiceCallBtn = document.getElementById('voiceCallBtn');
+    const videoCallBtn = document.getElementById('videoCallBtn');
+    if (voiceCallBtn && videoCallBtn) {
+        voiceCallBtn.style.display = chat.type === 'private' ? 'flex' : 'none';
+        videoCallBtn.style.display = chat.type === 'private' ? 'flex' : 'none';
+    }
     
     renderMessages();
     renderChatsList();
+}
+
+// Helper functions for call initiation
+function initiateVoiceCall() {
+    if (!currentChat || currentChat.type !== 'private') {
+        alert('Дзвінки доступні лише в приватних чатах');
+        return;
+    }
+    const recipient = currentChat.participants[0];
+    startVoiceCall(recipient);
+}
+
+function initiateVideoCall() {
+    if (!currentChat || currentChat.type !== 'private') {
+        alert('Дзвінки доступні лише в приватних чатах');
+        return;
+    }
+    const recipient = currentChat.participants[0];
+    startVideoCall(recipient);
 }
 
 function renderMessages() {
@@ -508,6 +544,7 @@ function createMessageElement(message) {
             <div class="message-bubble">
                 ${message.text ? `<div class="message-text">${escapeHtml(message.text)}</div>` : ''}
                 ${message.file ? renderFileAttachment(message.file) : ''}
+                ${message.voice ? renderVoiceMessage(message.voice) : ''}
                 ${message.edited ? '<span style="font-size: 11px; color: var(--text-muted); margin-top: 4px; display: block;">изменено</span>' : ''}
             </div>
             ${renderMessageReactions(message)}
@@ -535,6 +572,28 @@ function renderFileAttachment(file) {
                 </div>
             </div>
         `;
+    }
+}
+
+function renderVoiceMessage(voice) {
+    const voiceId = 'voice_' + generateId();
+    return `
+        <div class="voice-message">
+            <button class="voice-play-btn" onclick="playVoiceMessage('${voiceId}')">▶️</button>
+            <audio id="${voiceId}" src="${voice.data}" preload="metadata"></audio>
+            <span class="voice-duration" id="${voiceId}_duration">00:00</span>
+        </div>
+    `;
+}
+
+function playVoiceMessage(voiceId) {
+    const audio = document.getElementById(voiceId);
+    if (!audio) return;
+    
+    if (audio.paused) {
+        audio.play();
+    } else {
+        audio.pause();
     }
 }
 
@@ -2521,3 +2580,33 @@ function selectTheme(themeId) {
     });
     document.querySelector(`.theme-option.${themeId}`).classList.add('active');
 }
+
+// ============ MOBILE MENU TOGGLE ============
+function toggleMobileMenu() {
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileToggle');
+    
+    sidebar.classList.toggle('active');
+    
+    // Update icon
+    if (sidebar.classList.contains('active')) {
+        toggle.textContent = '✕';
+    } else {
+        toggle.textContent = '☰';
+    }
+}
+
+// Close mobile menu when clicking outside
+document.addEventListener('click', (e) => {
+    const sidebar = document.getElementById('sidebar');
+    const toggle = document.getElementById('mobileToggle');
+    
+    if (sidebar && toggle && sidebar.classList.contains('active')) {
+        // Check if click is outside sidebar and toggle button
+        if (!sidebar.contains(e.target) && !toggle.contains(e.target)) {
+            sidebar.classList.remove('active');
+            toggle.textContent = '☰';
+        }
+    }
+});
+

@@ -90,6 +90,28 @@ wss.on('connection', (ws) => {
         return;
       }
       
+      // WebRTC Signaling for Voice/Video Calls
+      if (data.type === 'call-offer' || data.type === 'call-answer' || 
+          data.type === 'ice-candidate' || data.type === 'call-end' ||
+          data.type === 'call-reject') {
+        if (data.to) {
+          const recipientWs = clients.get(data.to);
+          if (recipientWs && recipientWs.readyState === WebSocket.OPEN) {
+            console.log(`📞 Передача сигнала ${data.type} от ${data.from} к ${data.to}`);
+            recipientWs.send(JSON.stringify(data));
+          } else {
+            console.log(`⚠️ Получатель ${data.to} не в сети`);
+            // Notify sender that recipient is offline
+            ws.send(JSON.stringify({
+              type: 'call-error',
+              error: 'Користувач не в мережі',
+              callId: data.callId
+            }));
+          }
+        }
+        return;
+      }
+      
       // Relay message to recipient(s)
       if (data.type === 'signal' || data.type === 'message') {
         if (data.to) {
